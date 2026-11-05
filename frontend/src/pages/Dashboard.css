@@ -1,0 +1,509 @@
+/* Dashboard Styles */
+
+.dashboard {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0d0d0d 0%, #1a1a2e 100%);
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.header-left h1 {
+  font-size: 1.8rem;
+  margin: 0;
+  background: linear-gradient(135deg, #7c4dff, #ff4081);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.last-update {
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.header-right {
+  display: flex;
+  gap: 12px;
+}
+
+.btn-refresh,
+.btn-logout {
+  padding: 8px 16px;
+  font-size: 0.9rem;
+}
+
+.btn-refresh {
+  background: #333;
+}
+
+.btn-logout {
+  background: #444;
+}
+
+/* Login Screen */
+.dashboard-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0d0d0d 0%, #1a1a2e 100%);
+}
+
+.login-card {
+  background: #1a1a1a;
+  padding: 48px;
+  border-radius: 16px;
+  text-align: center;
+  max-width: 400px;
+  width: 90%;
+}
+
+.login-card h1 {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.login-card h2 {
+  color: #888;
+  font-weight: normal;
+  margin-bottom: 32px;
+}
+
+.login-card input {
+  margin-bottom: 16px;
+}
+
+.login-card .error {
+  color: #ff4444;
+  margin-bottom: 16px;
+}
+
+/* Period Filter */
+.period-filter {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.period-filter > span {
+  color: #888;
+  font-weight: 500;
+}
+
+.period-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.period-buttons button {
+  padding: 8px 16px;
+  background: #222;
+  border: 1px solid #333;
+  font-size: 0.9rem;
+}
+
+.period-buttons button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Stats Grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: linear-gradient(135deg, #1e1e2e 0%, #252535 100%);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  border: 1px solid #333;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.stat-icon {
+  font-size: 2.5rem;
+}
+
+.stat-content {
+  flex: 1;
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #fff, #ccc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.stat-title {
+  color: #aaa;
+  font-size: 0.9rem;
+  margin-top: 4px;
+}
+
+.stat-subtitle {
+  color: #666;
+  font-size: 0.8rem;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.growth {
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.growth.positive {
+  background: rgba(76, 175, 80, 0.2);
+  color: #4caf50;
+}
+
+.growth.negative {
+  background: rgba(244, 67, 54, 0.2);
+  color: #f44336;
+}
+
+/* Totals Row */
+.totals-row {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+  background: #1a1a1a;
+  padding: 16px 24px;
+  border-radius: 12px;
+}
+
+.total-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.total-label {
+  color: #666;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+.total-value {
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+/* Dashboard Sections */
+.dashboard-section {
+  background: #1a1a1a;
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 24px;
+}
+
+.dashboard-section h2 {
+  font-size: 1.2rem;
+  margin: 0 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Active Rooms */
+.active-rooms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.active-room-card {
+  background: linear-gradient(135deg, #2d2d3d 0%, #1e1e2e 100%);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid #444;
+}
+
+.room-code {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.room-info {
+  display: flex;
+  gap: 12px;
+  font-size: 0.85rem;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.now-playing-mini {
+  font-size: 0.8rem;
+  color: #aaa;
+  background: #333;
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Charts Row */
+.charts-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.chart-section {
+  min-height: 300px;
+}
+
+/* Daily Chart */
+.daily-chart {
+  height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.chart-bar-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+}
+
+.chart-bar {
+  width: 100%;
+  max-width: 40px;
+  background: linear-gradient(180deg, #ff4081 0%, #7c4dff 100%);
+  border-radius: 4px 4px 0 0;
+  min-height: 4px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  transition: height 0.3s;
+}
+
+.bar-value {
+  font-size: 0.7rem;
+  color: #fff;
+  font-weight: 600;
+  transform: translateY(-18px);
+}
+
+.bar-label {
+  font-size: 0.65rem;
+  color: #666;
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.chart-legend {
+  text-align: center;
+  color: #666;
+  font-size: 0.8rem;
+  padding-top: 12px;
+  border-top: 1px solid #333;
+  margin-top: 8px;
+}
+
+/* Peak Hours Chart */
+.peak-hours-chart {
+  display: flex;
+  flex-direction: column;
+}
+
+.hours-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+
+.hour-cell {
+  aspect-ratio: 1;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #222;
+  transition: background-color 0.3s;
+}
+
+.hour-label {
+  font-size: 0.75rem;
+  color: #fff;
+  font-weight: 500;
+}
+
+/* Top Content Row */
+.top-content-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 24px;
+}
+
+/* Top Lists */
+.top-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.top-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #222;
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+
+.top-item:hover {
+  background: #2a2a2a;
+}
+
+.rank {
+  font-size: 1.2rem;
+  min-width: 32px;
+  text-align: center;
+}
+
+.song-thumb {
+  width: 48px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.song-info,
+.user-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.song-title,
+.user-name {
+  display: block;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.play-count,
+.song-count {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.user-avatar {
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #7c4dff, #ff4081);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.2rem;
+}
+
+.bar-container {
+  width: 80px;
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  background: linear-gradient(90deg, #ff4081, #7c4dff);
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+
+.bar.user-bar {
+  background: linear-gradient(90deg, #7c4dff, #3f51b5);
+}
+
+.empty-state {
+  color: #666;
+  text-align: center;
+  padding: 32px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .dashboard {
+    padding: 16px;
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .header-left h1 {
+    font-size: 1.4rem;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .charts-row,
+  .top-content-row {
+    grid-template-columns: 1fr;
+  }
+
+  .totals-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bar-container {
+    display: none;
+  }
+}

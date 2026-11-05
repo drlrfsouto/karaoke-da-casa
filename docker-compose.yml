@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: karaokeando-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: karaokeando
+      POSTGRES_PASSWORD: karaokeando_dev_123
+      POSTGRES_DB: karaokeando
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

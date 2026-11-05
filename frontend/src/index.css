@@ -1,0 +1,142 @@
+:root {
+  --bg: #0d0d0d;
+  --card: #1a1a1a;
+  --accent: #ff4081;
+  --text: #fff;
+  --muted: #888;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  transition: opacity 0.2s;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+input {
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid #333;
+  background: #222;
+  color: #fff;
+  font-size: 1rem;
+  width: 100%;
+}
+
+.container {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 16px;
+}
+
+.queue-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #333;
+}
+.queue-item:last-child {
+  border-bottom: none;
+}
+
+.ranking-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+}
+
+.now-playing {
+  background: linear-gradient(135deg, #ff4081 0%, #7c4dff 100%);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.player-wrapper {
+  position: relative;
+  width: 100%;
+  padding-bottom: 56.25%; /* 16:9 */
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.player-wrapper iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.tabs button {
+  flex: 1;
+  background: #333;
+}
+.tabs button.active {
+  background: var(--accent);
+}
+
+/* YouTube player container - ensure iframe fills it */
+.yt-container {
+  position: relative;
+  width: 100%;
+  height: 0;
+  padding-bottom: 56.25%; /* 16:9 aspect ratio */
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.yt-container > div,
+.yt-container iframe {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  border: none;
+}

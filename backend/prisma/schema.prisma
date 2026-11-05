@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  phone        String?
+  passwordHash String?   @map("password_hash")
+  city         String?
+  birthDate    DateTime? @map("birth_date") @db.Date
+  gender       String?
+  canHost      Boolean   @default(false) @map("can_host")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  ownedRooms Room[] @relation("RoomOwner")
+
+  @@map("users")
+}
+
+model Room {
+  id             String   @id @default(uuid())
+  code           String   @unique
+  ownerId        String   @map("owner_id")
+  tvPasswordHash String   @map("tv_password_hash")
+  uniqueVisitors Int      @default(0) @map("unique_visitors")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Relations
+  owner User @relation("RoomOwner", fields: [ownerId], references: [id])
+
+  @@map("rooms")
+}
+
+model Song {
+  id           String    @id @default(uuid())
+  videoId      String    @unique @map("video_id")
+  title        String
+  addedBy      String    @map("added_by")
+  playCount    Int       @default(0) @map("play_count")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastPlayedAt DateTime? @map("last_played_at")
+
+  @@map("songs")
+}

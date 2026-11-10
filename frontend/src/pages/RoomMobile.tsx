@@ -7,6 +7,7 @@ import {
   getState,
   getParticipants,
   getSongLibrary,
+  searchSongLibrary,
   getTopSongs,
   deleteSong,
   sendPlayerCommand,
@@ -18,7 +19,26 @@ import {
   type SavedSong,
   type TopSong,
   type YouTubeSearchResult,
+  voteCrowd,
+  importarCatalogo,
 } from "../api";
+
+/**
+ * Busca tolerante a acento, maiúscula e ordem das palavras:
+ * "avioes fazendeiro" encontra "Aviões do Forró — Vou Virar Fazendeiro".
+ * Feito para aguentar catálogo de dezenas de milhares de músicas.
+ */
+const normalizaBusca = (t: string): string =>
+  t
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+const combinaBusca = (titulo: string, termos: string[]): boolean => {
+  const alvo = normalizaBusca(titulo);
+  if (termos.length === 1) return alvo.includes(termos[0]);
+  return termos.every(t => alvo.includes(t));
+};
 
 interface Singer {
   id: string;
@@ -49,6 +69,13 @@ interface RankingEntry {
   score: number;
 }
 
+interface CrowdState {
+  open: boolean;
+  count: number;
+  average: number | null;
+  votes: Record<string, { score: number; name: string }>;
+}
+
 interface RoomState {
   roomCode: string;
   nowPlaying: QueueItem | null;
@@ -56,6 +83,7 @@ interface RoomState {
   ranking: Record<string, RankingEntry>;
   duetRanking: DuetRankingEntry[];
   showingScore: boolean;
+  crowd?: CrowdState;
 }
 
 type Tab = "queue" | "ranking" | "saved";
@@ -384,7 +412,73 @@ export default function RoomMobile() {
   const [customTitle, setCustomTitle] = useState(""); // For when pasting a link
   const [adding, setAdding] = useState<string | null>(null); // videoId being added
   const [songLibrary, setSongLibrary] = useState<SavedSong[]>([]);
+  // O catálogo pode ter 20 mil+ músicas: a lista do celular carrega só as
+  // primeiras (leves) e a busca "de verdade" acontece no servidor.
+  const [totalBiblioteca, setTotalBiblioteca] = useState(0);
+  const [achadosBusca, setAchadosBusca] = useState<SavedSong[] | null>(null);
+  const [qtdAchados, setQtdAchados] = useState(0);
+  // busca da aba "Músicas" (filtro da lista do catálogo)
+  const [achadosFiltro, setAchadosFiltro] = useState<SavedSong[]>([]);
+  const [qtdFiltro, setQtdFiltro] = useState(0);
+  const [buscandoFiltro, setBuscandoFiltro] = useState(false);
   const [savedFilter, setSavedFilter] = useState("");
+  const [importando, setImportando] = useState<{ total: number; feitos: number } | null>(null);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
+
+  /**
+   * Importa um catálogo JSON para a biblioteca (ex.: gerado por
+   * tools/importar_tvkaraoke.py). Aceita {musicas:[...]} ou um array puro.
+   */
+  const handleImportCatalog = async (file: File) => {
+    setImportMsg(null);
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as unknown;
+      type CatalogoItem = {
+        videoId?: string;
+        title?: string;
+        artist?: string;
+        addedBy?: string;
+      };
+      const lista = Array.isArray(parsed)
+        ? (parsed as CatalogoItem[])
+        : ((parsed as { musicas?: CatalogoItem[] }).musicas ?? []);
+      const validos = lista.filter(
+        m => typeof m?.videoId === "string" && /^[A-Za-z0-9_-]{11}$/.test(m.videoId)
+      );
+      if (!validos.length) {
+        setImportMsg(
+          "Nenhuma música válida no arquivo. Rode o tools/enriquecer_catalogo.py antes de importar."
+        );
+        return;
+      }
+      // Um envio só (o servidor resolve em bloco). Catálogo de 24 mil leva segundos.
+      setImportando({ total: validos.length, feitos: 0 });
+      const r = await importarCatalogo(
+        validos,
+        nickname || user?.name || "Catálogo"
+      );
+      setImportando({ total: validos.length, feitos: validos.length });
+      if (!r || (r as { error?: string }).error) {
+        setImportMsg(
+          "O servidor não aceitou o arquivo. Atualize a página e tente de novo."
+        );
+        setImportando(null);
+        return;
+      }
+      setImportando(null);
+      setImportMsg(
+        `Catálogo importado: ${r.inseridas} novas` +
+          (r.atualizadas ? `, ${r.atualizadas} nomes atualizados` : "") +
+          (r.ja_existiam && !r.atualizadas ? `, ${r.ja_existiam} já existiam` : "") +
+          `. Biblioteca agora com ${r.biblioteca} músicas.`
+      );
+      recarregaBiblioteca();
+    } catch {
+      setImportando(null);
+      setImportMsg("Não consegui ler o arquivo. Tem que ser o JSON do catálogo.");
+    }
+  };
   const [previewVideo, setPreviewVideo] = useState<YouTubeSearchResult | null>(
     null
   );
@@ -447,15 +541,73 @@ export default function RoomMobile() {
     }
   };
 
-  // Load song library and top songs on mount
-  useEffect(() => {
+  // Carrega a biblioteca (leve: só as mais recentes) e as mais tocadas
+  const recarregaBiblioteca = () => {
     getSongLibrary()
-      .then(setSongLibrary)
+      .then(r => {
+        setSongLibrary(r.songs);
+        setTotalBiblioteca(r.total);
+      })
       .catch(() => {});
+  };
+
+  useEffect(() => {
+    recarregaBiblioteca();
     getTopSongs(10)
       .then(setTopSongs)
       .catch(() => {});
   }, []);
+
+  // Busca da aba "Músicas": também no servidor, para achar em 20 mil+ músicas
+  useEffect(() => {
+    const q = savedFilter.trim();
+    if (normalizaBusca(q).length < 2) {
+      setAchadosFiltro([]);
+      setQtdFiltro(0);
+      setBuscandoFiltro(false);
+      return;
+    }
+    let vivo = true;
+    setBuscandoFiltro(true);
+    const t = setTimeout(() => {
+      searchSongLibrary(q, 60)
+        .then(r => {
+          if (!vivo) return;
+          setAchadosFiltro(r.songs);
+          setQtdFiltro(r.total);
+        })
+        .catch(() => {})
+        .finally(() => vivo && setBuscandoFiltro(false));
+    }, 250);
+    return () => {
+      vivo = false;
+      clearTimeout(t);
+    };
+  }, [savedFilter]);
+
+  // Busca no catálogo inteiro, no servidor (aguenta 20 mil+ músicas)
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2 || /^(https?:\/\/|.*youtu)|\.be\//.test(q)) {
+      setAchadosBusca(null);
+      setQtdAchados(0);
+      return;
+    }
+    let vivo = true;
+    const t = setTimeout(() => {
+      searchSongLibrary(q, 40)
+        .then(r => {
+          if (!vivo) return;
+          setAchadosBusca(r.songs);
+          setQtdAchados(r.total);
+        })
+        .catch(() => {});
+    }, 250);
+    return () => {
+      vivo = false;
+      clearTimeout(t);
+    };
+  }, [searchQuery]);
 
   // Salvar última sala visitada
   useEffect(() => {
@@ -545,11 +697,7 @@ export default function RoomMobile() {
 
   // Refresh song library when tab changes to saved
   useEffect(() => {
-    if (tab === "saved") {
-      getSongLibrary()
-        .then(setSongLibrary)
-        .catch(() => {});
-    }
+    if (tab === "saved") recarregaBiblioteca();
   }, [tab]);
 
   // Extract video ID from YouTube URL or return null
@@ -569,11 +717,19 @@ export default function RoomMobile() {
   const isLinkMode = extractVideoId(searchQuery) !== null;
 
   // Filter library songs that match query
-  const matchingLibrarySongs = searchQuery.trim()
-    ? songLibrary.filter(song =>
-        song.title.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : [];
+  const termosBusca = normalizaBusca(searchQuery.trim()).split(/\s+/).filter(Boolean);
+  // Sugestões "na biblioteca": vêm do servidor (catálogo inteiro); se ele ainda
+  // não respondeu, usa o que já está carregado no aparelho.
+  const matchingLibrarySongs = (
+    achadosBusca && achadosBusca.length
+      ? achadosBusca
+      : songLibrary.filter(song => combinaBusca(song.title, termosBusca))
+  ).slice(0, 5);
+
+  // Lista da aba "Músicas": sem filtro, mostra as mais recentes; com filtro,
+  // mostra o resultado da busca no catálogo inteiro.
+  const filtrandoCatalogo = normalizaBusca(savedFilter.trim()).length >= 2;
+  const listaCatalogo = filtrandoCatalogo ? achadosFiltro : songLibrary;
 
   const handleSearch = async () => {
     const query = searchQuery.trim();
@@ -617,7 +773,7 @@ export default function RoomMobile() {
 
     // If there are matching library songs, don't search YouTube yet
     // User can click "Buscar no YouTube" if they want more results
-    if (matchingLibrarySongs.length > 0) {
+    if (matchingLibrarySongs.length > 0 || qtdAchados > 0) {
       setSearchResults([]);
       setSearching(false);
       return;
@@ -712,9 +868,7 @@ export default function RoomMobile() {
     setSavedFilter(""); // Also clear library filter
 
     // Refresh library
-    getSongLibrary()
-      .then(setSongLibrary)
-      .catch(() => {});
+    recarregaBiblioteca();
   };
 
   // Legacy function - now opens modal
@@ -1099,6 +1253,76 @@ export default function RoomMobile() {
           Músicas
         </button>
       </div>
+
+      {/* Nota da plateia: aparece quando a votação da música está aberta */}
+      {state.nowPlaying && state.crowd?.open && (
+        <div
+          className="card"
+          style={{
+            background: "linear-gradient(135deg,#2a1436,#1b1f2a)",
+            border: "1px solid #ff4081",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+              marginBottom: 6,
+            }}
+          >
+            <h3 style={{ margin: 0 }}>Vote no cantor 🎉</h3>
+            <span style={{ fontSize: ".8rem", opacity: 0.7 }}>
+              {state.crowd.count} voto{state.crowd.count === 1 ? "" : "s"}
+              {state.crowd.average !== null
+                ? ` · média ${state.crowd.average.toFixed(1)}`
+                : ""}
+            </span>
+          </div>
+          <p style={{ fontSize: ".85rem", opacity: 0.75, margin: "0 0 10px" }}>
+            {state.nowPlaying.singers?.map(x => (typeof x === "string" ? x : x.name)).join(" e ") ||
+              state.nowPlaying.requestedBy}
+            {" — "}
+            {state.nowPlaying.title}
+          </p>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {[0, 2, 4, 6, 8, 10].map(n => {
+              const meuVoto = user && state.crowd?.votes?.[user.id]?.score;
+              const escolhido = meuVoto === n;
+              return (
+                <button
+                  key={n}
+                  onClick={async () => {
+                    if (!code) return;
+                    await voteCrowd(code, {
+                      userId: user?.id,
+                      name: nickname || user?.name,
+                      score: n,
+                    }).catch(() => {});
+                  }}
+                  style={{
+                    flex: "1 1 44px",
+                    minWidth: 44,
+                    padding: "12px 0",
+                    borderRadius: 10,
+                    border: escolhido ? "2px solid #22e3c3" : "1px solid #444",
+                    background: escolhido ? "#1f6f5f" : "#22252f",
+                    color: "#fff",
+                    fontWeight: 800,
+                    fontSize: "1rem",
+                  }}
+                >
+                  {n === 10 ? "10" : n}
+                </button>
+              );
+            })}
+          </div>
+          <p style={{ fontSize: ".75rem", opacity: 0.55, margin: "8px 0 0" }}>
+            Pode trocar o voto até a música acabar. A nota final mistura a voz
+            (70%) com a plateia (30%).
+          </p>
+        </div>
+      )}
 
       {tab === "queue" && (
         <div className="card">
@@ -1559,6 +1783,12 @@ export default function RoomMobile() {
                           }}
                         >
                           {result.channelTitle}
+                          {result.duration ? (
+                            <span style={{ opacity: 0.6 }}>
+                              {" · "}
+                              {result.duration}
+                            </span>
+                          ) : null}
                         </div>
                         <button
                           onClick={() => handleAddFromSearch(result)}
@@ -1853,7 +2083,80 @@ export default function RoomMobile() {
           <p style={{ color: "#888", fontSize: "0.85rem", marginBottom: 12 }}>
             Músicas adicionadas ficam salvas aqui para todos.
           </p>
-          {songLibrary.length === 0 ? (
+
+          {/* Importar catálogo pronto (ex.: TVKaraokê) */}
+          <div
+            style={{
+              background: "#22252f",
+              border: "1px dashed #555",
+              borderRadius: 10,
+              padding: 12,
+              marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: ".9rem", marginBottom: 4 }}>
+              Importar catálogo (JSON)
+            </div>
+            <div style={{ fontSize: ".78rem", opacity: 0.65, marginBottom: 8 }}>
+              Use o <code>catalogo-bonito.json</code> (gerado por{" "}
+              <code>tools/importar_tvkaraoke.py</code> +{" "}
+              <code>tools/enriquecer_catalogo.py</code>). Pode reimportar à
+              vontade: as músicas novas entram e os nomes antigos são
+              atualizados, sem duplicar.
+            </div>
+            <label
+              style={{
+                display: "inline-block",
+                padding: "9px 14px",
+                borderRadius: 8,
+                background: importando ? "#444" : "#8b5cff",
+                fontWeight: 700,
+                fontSize: ".85rem",
+                cursor: importando ? "wait" : "pointer",
+              }}
+            >
+              {importando
+                ? `Importando ${importando.feitos}/${importando.total}…`
+                : "Escolher arquivo"}
+              <input
+                type="file"
+                accept="application/json,.json"
+                style={{ display: "none" }}
+                disabled={!!importando}
+                onChange={e => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleImportCatalog(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {importando && (
+              <div
+                style={{
+                  height: 6,
+                  background: "#111",
+                  borderRadius: 4,
+                  marginTop: 8,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${Math.round((importando.feitos / importando.total) * 100)}%`,
+                    background: "#22e3c3",
+                    transition: "width .2s",
+                  }}
+                />
+              </div>
+            )}
+            {importMsg && (
+              <div style={{ fontSize: ".8rem", marginTop: 8, color: "#22e3c3" }}>
+                {importMsg}
+              </div>
+            )}
+          </div>
+          {songLibrary.length === 0 && totalBiblioteca === 0 ? (
             <p style={{ color: "#888" }}>
               A biblioteca está vazia.
               <br />
@@ -1862,16 +2165,26 @@ export default function RoomMobile() {
           ) : (
             <>
               <input
-                placeholder="Filtrar músicas..."
+                placeholder="Buscar por música ou artista..."
                 value={savedFilter}
                 onChange={e => setSavedFilter(e.target.value)}
-                style={{ marginBottom: 12 }}
+                style={{ marginBottom: 6 }}
               />
+              <div style={{ fontSize: ".75rem", color: "#888", marginBottom: 10 }}>
+                {filtrandoCatalogo
+                  ? buscandoFiltro
+                    ? "Buscando no catálogo…"
+                    : `${qtdFiltro} música(s) encontrada(s)` +
+                      (qtdFiltro > listaCatalogo.length
+                        ? ` (mostrando ${listaCatalogo.length})`
+                        : "")
+                  : `Biblioteca: ${totalBiblioteca} músicas` +
+                    (totalBiblioteca > songLibrary.length
+                      ? ` · mostrando as ${songLibrary.length} mais recentes (use a busca)`
+                      : "")}
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {songLibrary
-                  .filter(song =>
-                    song.title.toLowerCase().includes(savedFilter.toLowerCase())
-                  )
+                {listaCatalogo
                   .map(song => (
                     <div
                       key={song.id}
@@ -1935,9 +2248,7 @@ export default function RoomMobile() {
                       </button>
                     </div>
                   ))}
-                {songLibrary.filter(song =>
-                  song.title.toLowerCase().includes(savedFilter.toLowerCase())
-                ).length === 0 && (
+                {listaCatalogo.length === 0 && !buscandoFiltro && (
                   <p style={{ color: "#888", textAlign: "center" }}>
                     Nenhuma música encontrada
                   </p>

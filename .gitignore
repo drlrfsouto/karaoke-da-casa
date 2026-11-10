@@ -41,3 +41,8 @@ coverage/
 # Cache
 .cache/
 .parcel-cache/
+
+# catálogo grande: sobe compactado
+catalogo.json
+catalogo.parcial.jsonl
+.cache-oembed.json

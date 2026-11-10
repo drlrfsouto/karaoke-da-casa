@@ -57,6 +57,91 @@ Mantido de propósito (é o fluxo original do projeto):
 Consequência prática: numa fila com 5 músicas, são 5 toques em "Começar" — um por música.
 Se um dia quiser fila contínua, é trocar uma linha no `finalize`/`skip` do backend.
 
+## Busca de músicas sem chave de API (novo)
+
+O endpoint `/api/youtube/search` agora tem **duas fontes**:
+
+| Fonte | Como funciona | Tempo | Precisa de quê |
+|---|---|---|---|
+| **pública** (primária) | o mesmo endpoint JSON que o site do YouTube usa (`youtubei/v1/search`) | ~0,5 s | nada |
+| **yt-dlp** (reserva) | binário local, formato `ytsearch10:` | ~6 s | `yt-dlp` instalado |
+
+A resposta virou `{ source, ms, results }`. O campo `source` diz qual fonte
+respondeu (`publica`, `yt-dlp (reserva)` ou `nenhuma`) e aparece no console do
+navegador como `[busca] fonte=publica`. Para testar cada fonte isolada:
+
+```bash
+curl "http://localhost:8787/api/youtube/search?q=evidencias&mode=ytdlp"
+curl "http://localhost:8787/api/youtube/search?q=evidencias&mode=public"
+```
+
+Cada resultado traz `videoId`, `title`, `channelTitle` e `duration` ("4:58"),
+que agora aparece no card do celular.
+
+**Sobre o YouKaraokê (youkaraoke.com.br):** o site não tem API própria de músicas —
+ele chama a YouTube Data API v3 (com chave dele) por uma função no Supabase. O
+`robots.txt` deles tem `Disallow: /api/`, então apontar um scraper para lá não é uma
+boa ideia, e o catálogo deles também não tem letra sincronizada nem nota por microfone.
+A busca pública acima entrega o mesmo resultado sem depender de ninguém.
+
+## Catálogo pronto: TVKaraokê (novo)
+
+`tools/importar_tvkaraoke.py` lê os sitemaps públicos do **tvkaraoke.com.br**
+(24.472 músicas já triadas como karaokê de verdade) e gera um JSON:
+
+```bash
+python3 tools/importar_tvkaraoke.py --limit 200          # amostra rápida
+python3 tools/importar_tvkaraoke.py --all --workers 12   # catálogo completo (~1 h)
+```
+
+Depois, no celular: aba **Músicas** → **Importar catálogo (JSON)** → escolha o arquivo.
+As músicas entram na biblioteca e passam a aparecer na busca.
+
+Observações: são ~4,9 músicas/s com 8 workers; o script usa só a biblioteca padrão do
+Python (sem `pip install`); e o catálogo é curadoria de terceiros — use em casa.
+
+### Deixando o catálogo bonito (`enriquecer_catalogo.py`)
+
+O TVKaraokê guarda nomes de arquivo ("Anitta Capa De Revista", sem acento). O script
+`tools/enriquecer_catalogo.py` consulta o **oEmbed público do YouTube** (0,03 s por vídeo,
+sem chave) e reescreve cada linha como `Artista — Título`:
+
+```bash
+python3 tools/enriquecer_catalogo.py --in catalogo.json --out catalogo-bonito.json
+python3 tools/enriquecer_catalogo.py --in catalogo.json --out catalogo-bonito.json \
+        --descartar-nao-karaoke      # remove o que não é karaokê/playback
+```
+
+O que ele conserta: separa artista e título (por espaço duplo ou hífen), corrige acentuação
+de palavras comuns ("Ate" → "Até", "Alianca" → "Aliança"), arruma conectivos
+("Até O Amanhecer" → "Até o Amanhecer"), remove emoji e "(Karaoke)" do nome, converte título
+todo em MAIÚSCULA para caixa normal e marca cada música com `karaoke: true/false`.
+
+Cache: `.cache-oembed.json` ao lado da saída — rodar de novo não repete consultas.
+Velocidade medida: **~390 vídeos/s** com 16 workers (24 mil em ~1 min depois da primeira passada;
+a importação do TVKaraokê, essa sim, leva ~1 h porque exige 1 request por página).
+
+O import no celular junta os dois campos: a biblioteca guarda `Artista — Título`, então a
+busca acha tanto por "Aviões" quanto por "Vou Virar Fazendeiro".
+
+## Nota da plateia (novo)
+
+Quando uma música começa, a TV abre a votação automaticamente. Cada convidado vota
+de 0 a 10 no celular (pode trocar o voto até a música acabar) e a TV mostra a média
+ao vivo no canto superior direito.
+
+A nota final passa a ser:
+
+| Situação | Cálculo |
+|---|---|
+| microfone + plateia | `70% voz + 30% plateia` |
+| só microfone | nota da voz |
+| só plateia | média da plateia (0–10 → 0–99) |
+| nenhum dos dois | modo festa (sorteio) |
+
+Rotas: `POST /api/rooms/:code/crowd/open`, `/crowd/close` e `/crowd/vote`
+(`{userId, name, score}`). O voto é por participante, um por música.
+
 ## Como rodar
 
 Pré-requisitos: Node 20+, PostgreSQL 16 (ou Docker) e `yt-dlp` no PATH (é ele que busca
@@ -99,12 +184,55 @@ O celular entra em `http://IP-DO-PC:3000/room/CODIGO` (o QR code da TV já leva 
    sozinha: a próxima música continua esperando o botão "Começar", do mesmo jeito que o
    resto do app. Trava de segurança: depois de 3 vídeos seguidos com erro a liberação
    automática para, para não esvaziar a fila se a rede estiver bloqueando o YouTube.
-3. **Busca é do YouTube**: o topo dos resultados muda com o tempo. A busca agora usa
+3. **Erro 153 do YouTube (importante)**: desde o fim de 2025 o player incorporado exige a
+   identificação do site (cabeçalho `Referer`). O app agora manda `referrer` na página e
+   `origin`/`widget_referrer` no player, e a TV tem um botão **"Abrir no YouTube"** como
+   saída. **Ao rodar por `http://localhost:3000` funciona**; abrindo o HTML direto do disco
+   (`file://`) o navegador não envia `Referer` e o YouTube recusa — use o servidor local.
+4. **Busca é do YouTube**: o topo dos resultados muda com o tempo. A busca agora usa
    "karaokê" quando a consulta é em português (antes vinha versão em espanhol de "Evidências"),
    mas escolher a versão certa no celular continua sendo o caminho mais confiável.
-4. **Nota da dupla**: os dois cantores recebem a mesma nota (o microfone é um só).
-5. **Sem ajuste de tom**: não há transposição nem guia vocal separado; o playback é o vídeo.
-6. **Celular não mede voz**: apenas a TV tem microfone; quem escolhe a música usa o celular.
+5. **Nota da dupla**: os dois cantores recebem a mesma nota (o microfone é um só).
+6. **Sem ajuste de tom**: não há transposição nem guia vocal separado; o playback é o vídeo.
+7. **Celular não mede voz**: apenas a TV tem microfone; quem escolhe a música usa o celular.
+
+---
+
+## Catálogo grande de verdade (24 mil músicas)
+
+Importar o catálogo do TVKaraokê no celular precisava aguentar o volume. Antes, cada
+música virava uma requisição (24 mil idas ao servidor) e a biblioteca inteira era
+baixada no aparelho. Agora:
+
+| Antes | Agora |
+|---|---|
+| 24 mil POSTs, uma música por vez | **1 POST** `/api/songs/import` — `createMany` em lotes de 1000 |
+| biblioteca inteira baixada no celular | `GET /api/songs?limit=300` traz as mais recentes + `total` |
+| busca só nas músicas já baixadas | **`GET /api/songs/search?q=`** procura no catálogo inteiro |
+| busca exigia acento igual ("Aviões") | busca **ignora acento, maiúscula e ordem**: "avioes", "AVIOES DO FORRO", "forro avioes" |
+
+- **Coluna `search_key`** (`backend/prisma/schema.prisma` + `lib/text.ts`): o título é
+  gravado sem acento, em minúsculas e sem pontuação. A busca usa `contains` sobre ela,
+  com índice. Quem já tinha biblioteca ganha o índice na subida do servidor
+  (`backfillSearchKeys`), sem reimportar nada.
+- **Medido com o catálogo real de 24.456 músicas**: importação em **2,0 s** (`bodyLimit`
+  de 40 MB nessa rota); busca no catálogo inteiro em **8–16 ms**; reimportar o mesmo
+  arquivo devolve `inseridas: 0, atualizadas: 0` (não duplica).
+- **Reimportar atualiza os nomes**: `POST /api/songs/import` com `atualizar: true`
+  renomeia no lugar (`INSERT ... ON CONFLICT DO UPDATE ... WHERE título mudou`), sem
+  perder `playCount` nem histórico. Foi assim que o catálogo passou de 12 mil para 24 mil
+  sem duplicar e os títulos melhorados substituíram os antigos.
+- O importador do TVKaraokê também ficou **retomável**: o progresso vai para
+  `catalogo.parcial.jsonl`; se cair no meio, rodar o mesmo comando continua de onde parou
+  (`--retry-falhas` para tentar as que falharam, `--reset` para começar do zero).
+
+**Receita completa** (na sua máquina, um comando por passo):
+
+```bash
+python3 tools/importar_tvkaraoke.py --all --workers 12 --out catalogo.json   # ~50 min, retomável
+python3 tools/enriquecer_catalogo.py --in catalogo.json --out catalogo-bonito.json  # ~1 min
+# celular > aba "Músicas" > "Escolher arquivo" > catalogo-bonito.json
+```
 
 ## Próximos passos sugeridos (em ordem de retorno)
 

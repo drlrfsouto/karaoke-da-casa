@@ -11,13 +11,18 @@ import roomRoutes, {
   recordRoomVisit,
 } from "./routes/rooms.js";
 import { verifyToken, UserTokenPayload, TvTokenPayload } from "./lib/auth.js";
+import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
 import prisma from "./lib/prisma.js";
+import { normalizaBusca } from "./lib/text.js";
 import {
   addSongToLibrary,
   incrementPlayCount,
   getSongLibrary as getSongLibraryFromDb,
   getTopSongs as getTopSongsFromDb,
   removeSongFromLibrary,
+  backfillSearchKeys,
+  upsertCatalogoRenomeando,
 } from "./lib/songs.js";
 
 const execAsync = promisify(exec);
@@ -61,6 +66,14 @@ interface RoomState {
   duetRanking?: Record<string, DuetRankingEntry>; // "id1|id2" -> { names, score, count }
   lastFinalizeMs: number;
   showingScore: boolean; // true while TV is showing score overlay
+  /**
+   * Nota da plateia: cada convidado vota no cantor pelo celular.
+   * Voto por participante (userId), 0–10, uma vez por música.
+   */
+  crowd?: {
+    votes: Record<string, { score: number; name: string }>;
+    open: boolean;
+  };
 }
 
 interface RoomConnections {
@@ -211,12 +224,28 @@ function getRoomState(room: RoomState) {
     }
   }
 
+  // Nota da plateia (média 0–10 e quantos votaram)
+  const crowdVotes = Object.values(room.crowd?.votes || {});
+  const crowd = {
+    open: !!room.crowd?.open,
+    count: crowdVotes.length,
+    average: crowdVotes.length
+      ? Math.round(
+          (crowdVotes.reduce((a, v) => a + v.score, 0) / crowdVotes.length) *
+            10,
+        ) / 10
+      : null,
+    votes: room.crowd?.votes || {},
+  };
+
   // Convert duet ranking to array format for frontend
-  const duetRankingArray = Object.values(room.duetRanking || {}).map(entry => ({
-    names: entry.names,
-    score: entry.score,
-    count: entry.count,
-  }));
+  const duetRankingArray = Object.values(room.duetRanking || {}).map(
+    (entry) => ({
+      names: entry.names,
+      score: entry.score,
+      count: entry.count,
+    }),
+  );
 
   return {
     roomCode: room.code,
@@ -229,7 +258,7 @@ function getRoomState(room: RoomState) {
           singers: room.nowPlaying.singers,
         }
       : null,
-    queue: room.queue.map(item => ({
+    queue: room.queue.map((item) => ({
       id: item.id,
       videoId: item.videoId,
       title: item.title,
@@ -239,6 +268,7 @@ function getRoomState(room: RoomState) {
     ranking: rankingForFrontend,
     duetRanking: duetRankingArray,
     showingScore: room.showingScore,
+    crowd,
   };
 }
 
@@ -299,7 +329,7 @@ function getParticipantsList(roomCode: string): ParticipantInfo[] {
 }
 
 function getParticipantsNamesList(roomCode: string): string[] {
-  return getParticipantsList(roomCode).map(p => p.name);
+  return getParticipantsList(roomCode).map((p) => p.name);
 }
 
 // Generate unique nickname for a user in a room
@@ -307,14 +337,15 @@ function getParticipantsNamesList(roomCode: string): string[] {
 function getUniqueNickname(
   roomCode: string,
   desiredName: string,
-  odUserId: string
+  odUserId: string,
 ): string {
   const participants = getParticipantsList(roomCode);
   const trimmedName = desiredName.trim();
 
   // Check if this exact name is already used by someone else
   const nameExists = participants.some(
-    p => p.name.toLowerCase() === trimmedName.toLowerCase() && p.id !== odUserId
+    (p) =>
+      p.name.toLowerCase() === trimmedName.toLowerCase() && p.id !== odUserId,
   );
 
   if (!nameExists) {
@@ -326,9 +357,9 @@ function getUniqueNickname(
   while (suffix < 100) {
     const candidateName = `${trimmedName}${suffix}`;
     const candidateExists = participants.some(
-      p =>
+      (p) =>
         p.name.toLowerCase() === candidateName.toLowerCase() &&
-        p.id !== odUserId
+        p.id !== odUserId,
     );
     if (!candidateExists) {
       return candidateName;
@@ -364,6 +395,7 @@ async function getOrRestoreRoom(roomCode: string): Promise<RoomState | null> {
       duetRanking: {},
       lastFinalizeMs: 0,
       showingScore: false,
+      crowd: { votes: {}, open: false },
     };
     addRoom(code, room);
     connections.set(code, {
@@ -436,7 +468,7 @@ app.get<{ Params: { roomCode: string } }>(
     const room = await getOrRestoreRoom(req.params.roomCode);
     if (!room) return reply.code(404).send({ error: "room_not_found" });
     return getRoomState(room);
-  }
+  },
 );
 
 // Get participants in room (for duet selection)
@@ -451,7 +483,7 @@ app.get<{ Params: { roomCode: string } }>(
 
     const participants = getParticipantsList(req.params.roomCode);
     return { participants };
-  }
+  },
 );
 
 // Enqueue
@@ -537,7 +569,7 @@ app.post<{ Params: { roomCode: string } }>(
     }
 
     return { ok: true };
-  }
+  },
 );
 
 // Queue management (host controls)
@@ -552,7 +584,7 @@ app.post<{
   if (!itemId) return reply.code(400).send({ error: "missing_itemId" });
 
   const before = room.queue.length;
-  room.queue = room.queue.filter(i => i.id !== itemId);
+  room.queue = room.queue.filter((i) => i.id !== itemId);
   if (room.queue.length === before) {
     return reply.code(404).send({ error: "not_found" });
   }
@@ -575,7 +607,7 @@ app.post<{
     return reply.code(400).send({ error: "invalid_direction" });
   }
 
-  const idx = room.queue.findIndex(i => i.id === itemId);
+  const idx = room.queue.findIndex((i) => i.id === itemId);
   if (idx === -1) return reply.code(404).send({ error: "not_found" });
 
   const newIdx = direction === "up" ? idx - 1 : idx + 1;
@@ -599,7 +631,7 @@ app.post<{
   const itemId = (req.body.itemId || "").trim();
   if (!itemId) return reply.code(400).send({ error: "missing_itemId" });
 
-  const idx = room.queue.findIndex(i => i.id === itemId);
+  const idx = room.queue.findIndex((i) => i.id === itemId);
   if (idx === -1) return reply.code(404).send({ error: "not_found" });
   if (idx === 0) return { ok: true };
 
@@ -615,116 +647,204 @@ app.post<{
   Params: { roomCode: string };
   Body: { requester?: string; voice?: VoiceMetrics };
 }>("/api/rooms/:roomCode/finalize", async (req, reply) => {
+  const room = await getOrRestoreRoom(req.params.roomCode);
+  if (!room) return reply.code(404).send({ error: "room_not_found" });
+  touchRoom(req.params.roomCode);
+
+  const requester = (req.body.requester || "").trim() || "Convidado";
+  const now = Date.now();
+
+  // 10s cooldown (party spam protection)
+  if (now - room.lastFinalizeMs < 10_000) {
+    return reply.code(429).send({ error: "cooldown", cooldownMs: 10_000 });
+  }
+  room.lastFinalizeMs = now;
+
+  if (!room.nowPlaying) {
+    return reply.code(400).send({ error: "nothing_playing" });
+  }
+
+  // Get all singers (supports duets) - now with IDs
+  const singers: Singer[] = room.nowPlaying.singers || [
+    { id: `anon_${randomId()}`, name: room.nowPlaying.requestedBy },
+  ];
+  const measured = scoreFromVoiceMetrics(req.body?.voice);
+
+  // Nota da plateia: média 0–10 -> 0–99 (peso 30% quando existe)
+  const crowdVotes = Object.values(room.crowd?.votes || {});
+  const crowdAvg = crowdVotes.length
+    ? crowdVotes.reduce((a, v) => a + v.score, 0) / crowdVotes.length
+    : null;
+  const crowdScore =
+    crowdAvg === null ? null : Math.round((crowdAvg / 10) * 99);
+
+  let score: number;
+  let scoring: string;
+  if (measured !== null && crowdScore !== null) {
+    score = Math.round(measured * 0.7 + crowdScore * 0.3);
+    scoring = "microfone+plateia";
+  } else if (measured !== null) {
+    score = measured;
+    scoring = "microfone";
+  } else if (crowdScore !== null) {
+    score = crowdScore;
+    scoring = "plateia";
+  } else {
+    score = biasedPartyScore();
+    scoring = "aleatoria";
+  }
+
+  // Give points to ALL singers (individual ranking)
+  for (const singer of singers) {
+    const existingEntry = room.ranking[singer.id];
+    if (!existingEntry || typeof existingEntry === "number") {
+      room.ranking[singer.id] = { name: singer.name, score: 0 };
+    }
+    (room.ranking[singer.id] as RankingEntry).score += score;
+    // Update name in case it changed
+    (room.ranking[singer.id] as RankingEntry).name = singer.name;
+  }
+
+  // If it's a duet, update duet ranking
+  if (singers.length === 2) {
+    // Initialize duetRanking if it doesn't exist (old room)
+    if (!room.duetRanking) {
+      room.duetRanking = {};
+    }
+    const duetKey = makeDuetKey(singers[0].id, singers[1].id);
+    if (!room.duetRanking[duetKey]) {
+      // Sort singers by ID to keep ID-name correspondence consistent
+      const sortedSingers = [...singers].sort((a, b) =>
+        a.id.localeCompare(b.id),
+      );
+      room.duetRanking[duetKey] = {
+        singerIds: [sortedSingers[0].id, sortedSingers[1].id] as [
+          string,
+          string,
+        ],
+        names: [sortedSingers[0].name, sortedSingers[1].name] as [
+          string,
+          string,
+        ],
+        score: 0,
+        count: 0,
+      };
+    } else {
+      // Update names based on singerIds order (preserves ID-name correspondence)
+      const entry = room.duetRanking[duetKey];
+      for (let i = 0; i < entry.singerIds.length; i++) {
+        const singer = singers.find((s) => s.id === entry.singerIds[i]);
+        if (singer) {
+          entry.names[i] = singer.name;
+        }
+      }
+    }
+    room.duetRanking[duetKey].score += score;
+    room.duetRanking[duetKey].count += 1;
+  }
+
+  // Format singer names for display (e.g., "Dede e Ana")
+  const singerNames = singers.map((s) => s.name);
+  const singerDisplay =
+    singerNames.length > 1
+      ? singerNames.slice(0, -1).join(", ") +
+        " e " +
+        singerNames[singerNames.length - 1]
+      : singerNames[0];
+
+  // Set showingScore flag - TV will clear it when done
+  room.showingScore = true;
+  // fecha a votação da música que acabou
+  if (room.crowd) room.crowd.open = false;
+
+  broadcast(room.code, {
+    type: "FINALIZED",
+    by: requester,
+    singer: singerDisplay,
+    singers: singerNames, // Array of singer names for display
+    score,
+    scoring,
+    crowdAverage: crowdAvg,
+    crowdCount: crowdVotes.length,
+    videoId: room.nowPlaying.videoId,
+    title: room.nowPlaying.title,
+  });
+
+  // Increment play count in database
+  const finalizedVideoId = room.nowPlaying.videoId;
+  incrementPlayCount(finalizedVideoId).catch(() => {
+    // Silent fail - finalize still works even if count fails
+  });
+
+  // NÃO auto-avança para próxima - espera alguém apertar "Começar"
+  room.nowPlaying = null;
+  broadcast(room.code, { type: "STATE", state: getRoomState(room) });
+
+  return { ok: true, score, scoring };
+});
+
+// ─────────────────────────────────────────────────────────────
+// Nota da plateia (o público vota pelo celular)
+// ─────────────────────────────────────────────────────────────
+
+// Abre/reinicia a votação da música atual
+app.post<{ Params: { roomCode: string } }>(
+  "/api/rooms/:roomCode/crowd/open",
+  async (req, reply) => {
     const room = await getOrRestoreRoom(req.params.roomCode);
     if (!room) return reply.code(404).send({ error: "room_not_found" });
-    touchRoom(req.params.roomCode);
-
-    const requester = (req.body.requester || "").trim() || "Convidado";
-    const now = Date.now();
-
-    // 10s cooldown (party spam protection)
-    if (now - room.lastFinalizeMs < 10_000) {
-      return reply.code(429).send({ error: "cooldown", cooldownMs: 10_000 });
-    }
-    room.lastFinalizeMs = now;
-
     if (!room.nowPlaying) {
       return reply.code(400).send({ error: "nothing_playing" });
     }
-
-    // Get all singers (supports duets) - now with IDs
-    const singers: Singer[] = room.nowPlaying.singers || [
-      { id: `anon_${randomId()}`, name: room.nowPlaying.requestedBy },
-    ];
-    const measured = scoreFromVoiceMetrics(req.body?.voice);
-    const score = measured === null ? biasedPartyScore() : measured;
-    const scoring = measured === null ? "aleatoria" : "microfone";
-
-    // Give points to ALL singers (individual ranking)
-    for (const singer of singers) {
-      const existingEntry = room.ranking[singer.id];
-      if (!existingEntry || typeof existingEntry === "number") {
-        room.ranking[singer.id] = { name: singer.name, score: 0 };
-      }
-      (room.ranking[singer.id] as RankingEntry).score += score;
-      // Update name in case it changed
-      (room.ranking[singer.id] as RankingEntry).name = singer.name;
-    }
-
-    // If it's a duet, update duet ranking
-    if (singers.length === 2) {
-      // Initialize duetRanking if it doesn't exist (old room)
-      if (!room.duetRanking) {
-        room.duetRanking = {};
-      }
-      const duetKey = makeDuetKey(singers[0].id, singers[1].id);
-      if (!room.duetRanking[duetKey]) {
-        // Sort singers by ID to keep ID-name correspondence consistent
-        const sortedSingers = [...singers].sort((a, b) =>
-          a.id.localeCompare(b.id)
-        );
-        room.duetRanking[duetKey] = {
-          singerIds: [sortedSingers[0].id, sortedSingers[1].id] as [
-            string,
-            string
-          ],
-          names: [sortedSingers[0].name, sortedSingers[1].name] as [
-            string,
-            string
-          ],
-          score: 0,
-          count: 0,
-        };
-      } else {
-        // Update names based on singerIds order (preserves ID-name correspondence)
-        const entry = room.duetRanking[duetKey];
-        for (let i = 0; i < entry.singerIds.length; i++) {
-          const singer = singers.find(s => s.id === entry.singerIds[i]);
-          if (singer) {
-            entry.names[i] = singer.name;
-          }
-        }
-      }
-      room.duetRanking[duetKey].score += score;
-      room.duetRanking[duetKey].count += 1;
-    }
-
-    // Format singer names for display (e.g., "Dede e Ana")
-    const singerNames = singers.map(s => s.name);
-    const singerDisplay =
-      singerNames.length > 1
-        ? singerNames.slice(0, -1).join(", ") +
-          " e " +
-          singerNames[singerNames.length - 1]
-        : singerNames[0];
-
-    // Set showingScore flag - TV will clear it when done
-    room.showingScore = true;
-
-    broadcast(room.code, {
-      type: "FINALIZED",
-      by: requester,
-      singer: singerDisplay,
-      singers: singerNames, // Array of singer names for display
-      score,
-      scoring,
-      videoId: room.nowPlaying.videoId,
-      title: room.nowPlaying.title,
-    });
-
-    // Increment play count in database
-    const finalizedVideoId = room.nowPlaying.videoId;
-    incrementPlayCount(finalizedVideoId).catch(() => {
-      // Silent fail - finalize still works even if count fails
-    });
-
-    // NÃO auto-avança para próxima - espera alguém apertar "Começar"
-    room.nowPlaying = null;
+    touchRoom(req.params.roomCode);
+    room.crowd = { votes: {}, open: true };
     broadcast(room.code, { type: "STATE", state: getRoomState(room) });
-
-    return { ok: true, score, scoring };
-  }
+    return { ok: true, open: true };
+  },
 );
+
+// Fecha a votação (a TV chama antes de finalizar)
+app.post<{ Params: { roomCode: string } }>(
+  "/api/rooms/:roomCode/crowd/close",
+  async (req, reply) => {
+    const room = await getOrRestoreRoom(req.params.roomCode);
+    if (!room) return reply.code(404).send({ error: "room_not_found" });
+    if (room.crowd) room.crowd.open = false;
+    const votes = Object.values(room.crowd?.votes || {});
+    const average = votes.length
+      ? Math.round(
+          (votes.reduce((a, v) => a + v.score, 0) / votes.length) * 10,
+        ) / 10
+      : null;
+    broadcast(room.code, { type: "STATE", state: getRoomState(room) });
+    return { ok: true, count: votes.length, average };
+  },
+);
+
+// Voto de um convidado (0–10). Um voto por participante por música.
+app.post<{
+  Params: { roomCode: string };
+  Body: { userId?: string; name?: string; score?: number };
+}>("/api/rooms/:roomCode/crowd/vote", async (req, reply) => {
+  const room = await getOrRestoreRoom(req.params.roomCode);
+  if (!room) return reply.code(404).send({ error: "room_not_found" });
+  if (!room.nowPlaying)
+    return reply.code(400).send({ error: "nothing_playing" });
+  if (!room.crowd?.open)
+    return reply.code(409).send({ error: "voting_closed" });
+
+  const score = Math.round(Number(req.body?.score));
+  if (!isFinite(score) || score < 0 || score > 10) {
+    return reply.code(400).send({ error: "invalid_score" });
+  }
+  const userId = (req.body?.userId || "").trim() || `anon_${randomId()}`;
+  const name = (req.body?.name || "").trim() || "Convidado";
+
+  room.crowd.votes[userId] = { score, name };
+  touchRoom(req.params.roomCode);
+  broadcast(room.code, { type: "STATE", state: getRoomState(room) });
+  return { ok: true, score };
+});
 
 // Pular vídeo (ex.: com incorporação bloqueada) — não pontua e sobe o próximo
 app.post<{ Params: { roomCode: string }; Body: { reason?: string } }>(
@@ -749,7 +869,7 @@ app.post<{ Params: { roomCode: string }; Body: { reason?: string } }>(
     });
     broadcast(room.code, { type: "STATE", state: getRoomState(room) });
     return { ok: true, skipped, next: room.nowPlaying?.title || null };
-  }
+  },
 );
 
 // Update user name (when user changes their display name)
@@ -773,7 +893,8 @@ app.post<{
   // Check for duplicate name in room
   const existingParticipants = getParticipantsList(req.params.roomCode);
   const duplicateName = existingParticipants.find(
-    p => p.name.toLowerCase() === trimmedName.toLowerCase() && p.id !== userId
+    (p) =>
+      p.name.toLowerCase() === trimmedName.toLowerCase() && p.id !== userId,
   );
   if (duplicateName) {
     return reply.code(400).send({
@@ -805,8 +926,8 @@ app.post<{
       }
     }
     // Also update requestedBy if it matches
-    if (item.singers.some(s => s.id === userId)) {
-      item.requestedBy = item.singers.map(s => s.name).join(" e ");
+    if (item.singers.some((s) => s.id === userId)) {
+      item.requestedBy = item.singers.map((s) => s.name).join(" e ");
     }
   }
 
@@ -817,9 +938,9 @@ app.post<{
         singer.name = trimmedName;
       }
     }
-    if (room.nowPlaying.singers.some(s => s.id === userId)) {
+    if (room.nowPlaying.singers.some((s) => s.id === userId)) {
       room.nowPlaying.requestedBy = room.nowPlaying.singers
-        .map(s => s.name)
+        .map((s) => s.name)
         .join(" e ");
     }
   }
@@ -858,7 +979,7 @@ app.post<{ Params: { roomCode: string } }>(
     broadcast(room.code, { type: "STATE", state: getRoomState(room) });
 
     return { ok: true };
-  }
+  },
 );
 
 // Remote play control (mobile -> TV)
@@ -888,7 +1009,7 @@ app.post<{ Params: { roomCode: string }; Body: { action: string } }>(
     }
 
     return { ok: true, action };
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -900,6 +1021,8 @@ interface YouTubeSearchResult {
   title: string;
   thumbnail: string;
   channelTitle: string;
+  /** "4:32" quando a fonte informa a duração */
+  duration?: string;
 }
 
 // Search YouTube using yt-dlp (same method as PiKaraoke)
@@ -936,8 +1059,102 @@ async function searchWithYtDlp(query: string): Promise<YouTubeSearchResult[]> {
   }
 }
 
+/**
+ * Busca no YouTube SEM chave de API.
+ *
+ * Usa o endpoint que o próprio site do YouTube usa (InnerTube, formato JSON).
+ * Não precisa de chave, conta nem cota. É a mesma fonte que sites de karaokê
+ * comerciais usam por trás — a diferença é que aqui não dependemos do servidor
+ * de ninguém.
+ *
+ * Vantagens sobre o yt-dlp: resposta em ~0,5 s (contra ~6 s) e não precisa
+ * instalar nada no Windows. O yt-dlp fica como reserva.
+ */
+async function searchWithInnerTube(
+  query: string,
+): Promise<YouTubeSearchResult[]> {
+  const body = {
+    context: {
+      client: {
+        clientName: "WEB",
+        clientVersion: "2.20240101.00.00",
+        hl: "pt",
+        gl: "BR",
+      },
+    },
+    query,
+  };
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(
+      "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept-Language": "pt-BR,pt;q=0.9",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+        },
+        body: JSON.stringify(body),
+        signal: ctl.signal,
+      },
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+
+    // percorre a árvore atrás de videoRenderer (o formato muda de nome às vezes)
+    const out: YouTubeSearchResult[] = [];
+    const seen = new Set<string>();
+    const walk = (node: unknown) => {
+      if (!node || typeof node !== "object" || out.length >= 16) return;
+      const obj = node as Record<string, unknown>;
+      const vr = obj.videoRenderer as
+        | {
+            videoId?: string;
+            title?: { runs?: { text?: string }[]; simpleText?: string };
+            ownerText?: { runs?: { text?: string }[] };
+            shortBylineText?: { runs?: { text?: string }[] };
+            lengthText?: { simpleText?: string };
+            viewCountText?: { simpleText?: string };
+          }
+        | undefined;
+      if (vr?.videoId && !seen.has(vr.videoId)) {
+        seen.add(vr.videoId);
+        const title =
+          vr.title?.runs?.map((r) => r.text || "").join("") ||
+          vr.title?.simpleText ||
+          "(sem título)";
+        const channel =
+          vr.ownerText?.runs?.map((r) => r.text || "").join("") ||
+          vr.shortBylineText?.runs?.map((r) => r.text || "").join("") ||
+          "";
+        out.push({
+          videoId: vr.videoId,
+          title,
+          thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/mqdefault.jpg`,
+          channelTitle: channel,
+          duration: vr.lengthText?.simpleText || "",
+        } as YouTubeSearchResult);
+      }
+      for (const v of Object.values(obj)) {
+        if (Array.isArray(v)) v.forEach(walk);
+        else if (v && typeof v === "object") walk(v);
+      }
+    };
+    walk(data);
+    return out;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Search YouTube
-app.get<{ Querystring: { q: string } }>(
+app.get<{ Querystring: { q: string; mode?: string } }>(
   "/api/youtube/search",
   async (req, reply) => {
     const query = (req.query.q || "").trim();
@@ -950,16 +1167,39 @@ app.get<{ Querystring: { q: string } }>(
       const ptHints =
         /[ãõáéíóúâêôç]/i.test(query) ||
         /\b(evidencias|musica|musicas|karaoke|karaokê|ao vivo|sertanejo|pagode|forro|forró|mpb|gospel|funk|axe|axé)\b/i.test(
-          query
+          query,
         );
       const searchTerm = query + (ptHints ? " karaokê" : " karaoke");
 
-      const results = await searchWithYtDlp(searchTerm);
-      return results;
+      // mode=ytdlp | mode=public servem para testar cada fonte isolada
+      const mode = (req.query.mode || "").toLowerCase();
+      const started = Date.now();
+
+      if (mode === "ytdlp") {
+        const only = await searchWithYtDlp(searchTerm);
+        return { source: "yt-dlp", ms: Date.now() - started, results: only };
+      }
+
+      const publicResults = await searchWithInnerTube(searchTerm);
+      if (publicResults.length >= 2) {
+        return {
+          source: "publica",
+          ms: Date.now() - started,
+          results: publicResults,
+        };
+      }
+
+      // reserva: yt-dlp (precisa estar instalado; resolve buscas que a pública erra)
+      const fallback = await searchWithYtDlp(searchTerm);
+      return {
+        source: fallback.length ? "yt-dlp (reserva)" : "nenhuma",
+        ms: Date.now() - started,
+        results: fallback.length ? fallback : publicResults,
+      };
     } catch {
       return reply.code(500).send({ error: "search_failed" });
     }
-  }
+  },
 );
 
 // Get video info from YouTube (for when user pastes a link)
@@ -991,26 +1231,81 @@ app.get<{ Querystring: { videoId: string } }>(
         channelTitle: "",
       };
     }
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
 // Song Library API (global, shared by all users) - uses database
 // ─────────────────────────────────────────────────────────────
 
-// List all songs in library
-app.get("/api/songs", async () => {
-  const songs = await getSongLibraryFromDb();
-  // Map to expected format
-  return songs.map(s => ({
-    id: s.id,
-    videoId: s.videoId,
-    title: s.title,
-    addedBy: s.addedBy,
-    savedAt: s.createdAt.getTime(),
-    playCount: s.playCount,
-  }));
+// Mapeia o formato do banco para o que o app usa
+const toSavedSong = (s: {
+  id: string;
+  videoId: string;
+  title: string;
+  addedBy: string;
+  createdAt: Date;
+  playCount: number;
+}) => ({
+  id: s.id,
+  videoId: s.videoId,
+  title: s.title,
+  addedBy: s.addedBy,
+  savedAt: s.createdAt.getTime(),
+  playCount: s.playCount,
 });
+
+// Lista a biblioteca (catálogo). Com 20 mil+ músicas, o app pede só as mais
+// recentes (`?limit=`) e busca o resto pela rota /api/songs/search.
+app.get<{ Querystring: { limit?: string } }>(
+  "/api/songs",
+  async (req, reply) => {
+    const pedido = Number(req.query.limit ?? 0);
+    const limit =
+      Number.isFinite(pedido) && pedido > 0 ? Math.min(pedido, 5000) : 0;
+    const [total, songs] = await Promise.all([
+      prisma.song.count(),
+      limit
+        ? prisma.song.findMany({ orderBy: { createdAt: "desc" }, take: limit })
+        : getSongLibraryFromDb(),
+    ]);
+    reply.header("Cache-Control", "no-store");
+    return { songs: songs.map(toSavedSong), total };
+  },
+);
+
+// Busca no catálogo inteiro, no servidor (tolerante a acento e maiúscula).
+// Vários termos = todos precisam aparecer: "forro avioes" acha
+// "Aviões do Forró — ...".
+app.get<{ Querystring: { q?: string; limit?: string } }>(
+  "/api/songs/search",
+  async (req) => {
+    const q = (req.query.q || "").trim();
+    const pedido = Number(req.query.limit ?? 40);
+    const limit = Math.min(Math.max(pedido > 0 ? pedido : 40, 1), 100);
+
+    // unaccent não está garantido no Postgres; para o volume de casa a
+    // comparação em SQL puro (ILIKE) já resolve o caso comum e é instantânea
+    // com o índice. Acentos são tratados em JS quando há termo acentuado.
+    if (!q) return { songs: [], total: 0 };
+    // A dica em destaque era "unaccent": usamos a coluna search_key, que já é
+    // o título sem acento e em minúsculas (preenchida ao salvar/importar).
+    const termos = normalizaBusca(q).split(" ").filter(Boolean);
+    if (!termos.length) return { songs: [], total: 0 };
+    const where = {
+      AND: termos.map((t) => ({ searchKey: { contains: t } })),
+    };
+    const [total, songs] = await Promise.all([
+      prisma.song.count({ where }),
+      prisma.song.findMany({
+        where,
+        orderBy: [{ playCount: "desc" }, { createdAt: "desc" }],
+        take: limit,
+      }),
+    ]);
+    return { songs: songs.map(toSavedSong), total };
+  },
+);
 
 // Save a song to library
 app.post<{
@@ -1023,8 +1318,90 @@ app.post<{
   if (!videoId) return reply.code(400).send({ error: "missing_videoId" });
 
   const song = await addSongToLibrary(videoId, title, addedBy);
+  // mantém a busca funcionando também para músicas adicionadas na mão
+  await prisma.song
+    .update({
+      where: { videoId },
+      data: { searchKey: normalizaBusca(title) },
+    })
+    .catch(() => {});
   return { ok: true, song };
 });
+
+// Importa o catálogo em bloco (24 mil músicas de uma vez).
+// O app não pula as que já existem: `createMany({skipDuplicates})` resolve em
+// UMA consulta, em vez de 24 mil idas e voltas ao banco.
+app.post<{
+  Body: {
+    musicas?: { videoId?: string; title?: string; artist?: string }[];
+    addedBy?: string;
+    /** reescreve o título de quem já existia (ex.: catálogo reenriquecido) */
+    atualizar?: boolean;
+  };
+}>(
+  "/api/songs/import",
+  // catálogo de 24 mil músicas passa de 1 MB (limite padrão do Fastify)
+  { bodyLimit: 40 * 1024 * 1024 },
+  async (req, reply) => {
+    const lista = Array.isArray(req.body?.musicas) ? req.body.musicas : [];
+    if (!lista.length)
+      return reply.code(400).send({ error: "missing_musicas" });
+    const addedBy = (req.body?.addedBy || "").trim() || "Catálogo";
+
+    const vistos = new Set<string>();
+    const linhas: {
+      videoId: string;
+      title: string;
+      searchKey: string;
+      addedBy: string;
+    }[] = [];
+    for (const m of lista) {
+      const videoId = (m?.videoId || "").trim();
+      if (!/^[A-Za-z0-9_-]{11}$/.test(videoId) || vistos.has(videoId)) continue;
+      vistos.add(videoId);
+      const titulo = (m?.title || "").trim() || videoId;
+      const artista = (m?.artist || "").trim();
+      // a biblioteca tem um campo só: "Artista — Título" faz a busca achar os dois
+      const tituloFinal =
+        artista && !titulo.toLowerCase().startsWith(artista.toLowerCase())
+          ? `${artista} — ${titulo}`
+          : titulo;
+      linhas.push({
+        videoId,
+        title: tituloFinal,
+        searchKey: normalizaBusca(tituloFinal),
+        addedBy,
+      });
+    }
+    if (!linhas.length)
+      return reply.code(400).send({ error: "no_valid_songs" });
+
+    const antes = await prisma.song.count();
+    // em lotes, para não estourar o limite de parâmetros do Postgres
+    let inseridas = 0;
+    let atualizadas = 0;
+    for (let i = 0; i < linhas.length; i += 1000) {
+      const lote = linhas.slice(i, i + 1000);
+      if (req.body.atualizar) {
+        // catálogo reenriquecido: renomeia no lugar quem já existe
+        atualizadas += await upsertCatalogoRenomeando(lote);
+      }
+      const r = await prisma.song.createMany({ data: lote, skipDuplicates: true });
+      inseridas += r.count;
+    }
+    const total = await prisma.song.count();
+    return {
+      ok: true,
+      recebidas: lista.length,
+      validas: linhas.length,
+      inseridas,
+      atualizadas,
+      ja_existiam: linhas.length - inseridas,
+      biblioteca: total,
+      antes,
+    };
+  },
+);
 
 // Delete a song from library (by videoId now, not id)
 app.delete<{ Params: { songId: string } }>(
@@ -1037,7 +1414,7 @@ app.delete<{ Params: { songId: string } }>(
     if (!deleted) return reply.code(404).send({ error: "not_found" });
 
     return { ok: true };
-  }
+  },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -1047,17 +1424,17 @@ app.delete<{ Params: { songId: string } }>(
 // Top songs (from database)
 app.get<{ Querystring: { limit?: string; key?: string } }>(
   "/api/analytics/top-songs",
-  async req => {
+  async (req) => {
     const limit = parseInt(req.query.limit || "20", 10);
     const songs = await getTopSongsFromDb(limit);
     return {
-      topSongs: songs.map(s => ({
+      topSongs: songs.map((s) => ({
         videoId: s.videoId,
         title: s.title,
         playCount: s.playCount,
       })),
     };
-  }
+  },
 );
 
 // Active rooms (admin only)
@@ -1081,7 +1458,7 @@ app.get<{ Querystring: { key?: string } }>(
     });
 
     return { activeRooms };
-  }
+  },
 );
 
 // WebSocket
@@ -1118,7 +1495,7 @@ app.get<{ Params: { roomCode: string } }>(
                   type: "ERROR",
                   error: "invalid_token",
                   message: "Token inválido ou expirado",
-                })
+                }),
               );
               socket.close();
               return;
@@ -1132,7 +1509,7 @@ app.get<{ Params: { roomCode: string } }>(
                     type: "ERROR",
                     error: "wrong_room",
                     message: "Token não é válido para esta sala",
-                  })
+                  }),
                 );
                 socket.close();
                 return;
@@ -1165,7 +1542,7 @@ app.get<{ Params: { roomCode: string } }>(
                   nickname: name,
                   originalName: requestedName,
                   wasModified: name !== requestedName,
-                })
+                }),
               );
 
               broadcastParticipants(roomCode);
@@ -1191,7 +1568,7 @@ app.get<{ Params: { roomCode: string } }>(
                     nickname: name,
                     originalName,
                     wasModified: true,
-                  })
+                  }),
                 );
               }
             }
@@ -1209,16 +1586,16 @@ app.get<{ Params: { roomCode: string } }>(
           }
 
           socket.send(
-            JSON.stringify({ type: "HELLO", roomCode, role, name, odUserId })
+            JSON.stringify({ type: "HELLO", roomCode, role, name, odUserId }),
           );
           socket.send(
-            JSON.stringify({ type: "STATE", state: getRoomState(room) })
+            JSON.stringify({ type: "STATE", state: getRoomState(room) }),
           );
           socket.send(
             JSON.stringify({
               type: "PARTICIPANTS",
               participants: getParticipantsList(roomCode),
-            })
+            }),
           );
         } else {
           socket.send(JSON.stringify({ type: "ACK" }));
@@ -1249,15 +1626,22 @@ app.get<{ Params: { roomCode: string } }>(
         }
       }
     });
-  }
+  },
 );
 
 // Start
 const PORT = parseInt(process.env.PORT || "8787", 10);
-app.listen({ port: PORT, host: "0.0.0.0" }, err => {
+app.listen({ port: PORT, host: "0.0.0.0" }, (err) => {
   if (err) {
     app.log.error(err);
     process.exit(1);
   }
   console.log(`🎤 Karaokêando backend running on http://localhost:${PORT}`);
+
+  // biblioteca antiga (de antes da busca sem acento) ganha a chave de busca
+  backfillSearchKeys()
+    .then((n) => {
+      if (n > 0) console.log(`🔎 Índice de busca atualizado em ${n} músicas.`);
+    })
+    .catch((err) => app.log.error(err));
 });

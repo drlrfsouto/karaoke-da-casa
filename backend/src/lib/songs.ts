@@ -1,4 +1,7 @@
 import prisma from "./prisma.js";
+import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
+import { normalizaBusca } from "./text.js";
 
 export interface SongInfo {
   id: string;
@@ -89,4 +92,69 @@ export async function findSongByVideoId(
   return prisma.song.findUnique({
     where: { videoId },
   });
+}
+
+/**
+ * Preenche a coluna de busca (search_key) das músicas que ainda estão sem ela.
+ * Acontece na subida do servidor: quem já tinha biblioteca não precisa
+ * reimportar nada para a busca passar a ignorar acentos.
+ */
+export async function backfillSearchKeys(lote = 1000): Promise<number> {
+  let total = 0;
+  for (let rodada = 0; rodada < 200; rodada++) {
+    const pendentes = await prisma.song.findMany({
+      where: { searchKey: "" },
+      select: { id: true, title: true },
+      take: lote,
+    });
+    if (pendentes.length === 0) break;
+    // updateMany por valor: agrupa os títulos iguais para gastar menos queries
+    const porChave = new Map<string, string[]>();
+    for (const p of pendentes) {
+      const chave = normalizaBusca(p.title);
+      porChave.set(chave, [...(porChave.get(chave) ?? []), p.id]);
+    }
+    for (const [chave, ids] of porChave) {
+      await prisma.song.updateMany({
+        where: { id: { in: ids } },
+        data: { searchKey: chave },
+      });
+    }
+    total += pendentes.length;
+  }
+  return total;
+}
+
+/**
+ * Atualiza o título (e a chave de busca) das músicas que já existem, sem tocar
+ * em playCount/lastPlayedAt. Serve para reimportar um catálogo reenriquecido:
+ * "Saudade ESTRANHA - Murilo Huff" vira "Murilo Huff — Saudade Estranha" no
+ * lugar, sem duplicar e sem perder o histórico de quem já cantou.
+ *
+ * Um INSERT ... ON CONFLICT só toca nas linhas cujo título mudou, em lotes.
+ */
+export async function upsertCatalogoRenomeando(
+  linhas: { videoId: string; title: string; searchKey: string; addedBy: string }[]
+): Promise<number> {
+  let alteradas = 0;
+  for (let i = 0; i < linhas.length; i += 1000) {
+    const lote = linhas.slice(i, i + 1000);
+    const valores = Prisma.join(
+      lote.map(
+        l =>
+          Prisma.sql`(${randomUUID()}, ${l.videoId}, ${l.title}, ${l.searchKey}, ${l.addedBy})`
+      )
+    );
+    const r = await prisma.$executeRaw`
+      INSERT INTO "songs" ("id", "video_id", "title", "search_key", "added_by")
+      VALUES ${valores}
+      ON CONFLICT ("video_id") DO UPDATE
+        SET "title" = EXCLUDED."title",
+            "search_key" = EXCLUDED."search_key"
+        WHERE "songs"."title" <> EXCLUDED."title"
+           OR "songs"."search_key" <> EXCLUDED."search_key"
+    `;
+    alteradas += Number(r) || 0;
+  }
+  return alteradas;
 }

@@ -23,8 +23,16 @@ export interface YouTubeSearchResult {
   title: string;
   thumbnail: string;
   channelTitle: string;
+  /** "4:32" quando a fonte informa a duração */
+  duration?: string;
 }
 
+/**
+ * Busca no YouTube pelo backend.
+ * O servidor responde `{ source, ms, results }` — a fonte primária é a busca
+ * pública (sem chave de API) e o yt-dlp entra como reserva. Aceitamos também
+ * o formato antigo (array puro) para não quebrar cache/versões mistas.
+ */
 export async function searchYouTube(
   query: string
 ): Promise<YouTubeSearchResult[]> {
@@ -32,7 +40,13 @@ export async function searchYouTube(
     `${API_BASE}/api/youtube/search?q=${encodeURIComponent(query)}`
   );
   if (!res.ok) return [];
-  return res.json();
+  const data: unknown = await res.json();
+  if (Array.isArray(data)) return data as YouTubeSearchResult[];
+  const wrapped = data as { results?: YouTubeSearchResult[]; source?: string };
+  if (wrapped.source) {
+    console.debug(`[busca] fonte=${wrapped.source}`);
+  }
+  return wrapped.results ?? [];
 }
 
 export async function getVideoInfo(
@@ -190,6 +204,42 @@ export async function queueItemToTop(roomCode: string, itemId: string) {
   return res.json();
 }
 
+// ─────────────────────────────────────────────────────────────
+// Nota da plateia (o público vota pelo celular)
+// ─────────────────────────────────────────────────────────────
+
+export async function openCrowdVote(roomCode: string) {
+  const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/crowd/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Fastify recusa POST com Content-Type JSON e corpo vazio
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function closeCrowdVote(roomCode: string) {
+  const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/crowd/close`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Fastify recusa POST com Content-Type JSON e corpo vazio
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function voteCrowd(
+  roomCode: string,
+  vote: { userId?: string; name?: string; score: number }
+) {
+  const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/crowd/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(vote),
+  });
+  return res.json();
+}
+
 // Pula um vídeo que não pode ser tocado (não pontua)
 export async function skipSong(roomCode: string, reason = "unplayable") {
   const res = await fetch(`${API_BASE}/api/rooms/${roomCode}/skip`, {
@@ -220,8 +270,51 @@ export interface SavedSong {
   savedAt: number;
 }
 
-export async function getSongLibrary(): Promise<SavedSong[]> {
-  const res = await fetch(`${API_BASE}/api/songs`);
+/**
+ * Biblioteca leve: só as `limit` músicas mais recentes + o total do catálogo.
+ * (Com 20 mil músicas não dá para baixar a lista inteira no celular.)
+ */
+export async function getSongLibrary(
+  limit = 300
+): Promise<{ songs: SavedSong[]; total: number }> {
+  const res = await fetch(`${API_BASE}/api/songs?limit=${limit}`);
+  const data = await res.json();
+  if (Array.isArray(data)) return { songs: data, total: data.length };
+  return data;
+}
+
+/** Busca no catálogo inteiro, no servidor. */
+export async function searchSongLibrary(
+  q: string,
+  limit = 40
+): Promise<{ songs: SavedSong[]; total: number }> {
+  const res = await fetch(
+    `${API_BASE}/api/songs/search?q=${encodeURIComponent(q)}&limit=${limit}`
+  );
+  return res.json();
+}
+
+export interface ImportResult {
+  ok: boolean;
+  recebidas: number;
+  validas: number;
+  inseridas: number;
+  atualizadas: number;
+  ja_existiam: number;
+  biblioteca: number;
+}
+
+/** Importa o catálogo inteiro de uma vez (o servidor ignora os repetidos). */
+export async function importarCatalogo(
+  musicas: { videoId?: string; title?: string; artist?: string }[],
+  addedBy: string,
+  atualizar = true
+): Promise<ImportResult> {
+  const res = await fetch(`${API_BASE}/api/songs/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ musicas, addedBy, atualizar }),
+  });
   return res.json();
 }
 

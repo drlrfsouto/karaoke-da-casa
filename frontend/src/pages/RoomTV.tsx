@@ -10,6 +10,8 @@ import {
   removeQueueItem,
   scoreDone,
   skipSong,
+  openCrowdVote,
+  closeCrowdVote,
 } from "../api";
 import ScoreOverlay from "../components/ScoreOverlay";
 import { VoiceHud, useVoiceHud, voiceSummary } from "../components/VoiceHud";
@@ -25,6 +27,7 @@ declare global {
           videoId: string;
           width?: string | number;
           height?: string | number;
+          host?: string;
           playerVars?: Record<string, number | string>;
           events?: {
             onReady?: (e: { target: YTPlayer }) => void;
@@ -46,6 +49,7 @@ interface YTPlayer {
   getPlayerState: () => number;
   getCurrentTime: () => number;
   getDuration: () => number;
+  getIframe?: () => HTMLIFrameElement;
 }
 
 interface QueueItem {
@@ -67,6 +71,13 @@ interface RankingEntry {
   score: number;
 }
 
+interface CrowdState {
+  open: boolean;
+  count: number;
+  average: number | null;
+  votes: Record<string, { score: number; name: string }>;
+}
+
 interface RoomState {
   roomCode: string;
   nowPlaying: QueueItem | null;
@@ -74,6 +85,7 @@ interface RoomState {
   ranking: Record<string, RankingEntry>;
   duetRanking: DuetRankingEntry[];
   showingScore: boolean;
+  crowd?: CrowdState;
 }
 
 type RankingView = "solo" | "duet";
@@ -348,6 +360,9 @@ export default function RoomTV() {
   const [videoDur, setVideoDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [ytFailed, setYtFailed] = useState(false);
+  const [ytErrorCode, setYtErrorCode] = useState<number | null>(null);
+  // o domínio do player: o nocookie às vezes é aceito quando o normal recusa
+  const [playerHost, setPlayerHost] = useState<"nocookie" | "normal">("nocookie");
   // ajuste fino da letra (segundos) — salvo por vídeo no localStorage
   const [lyricShift, setLyricShift] = useState(0);
 
@@ -430,6 +445,8 @@ export default function RoomTV() {
   const doFinalize = useCallback(
     async (requester: string) => {
       if (!code) return;
+      // fecha a votação da plateia para a média entrar na nota
+      await closeCrowdVote(code).catch(() => {});
       const engine = hud.engine.current;
       const metrics = engine ? engine.metrics() : null;
       const measured =
@@ -529,9 +546,14 @@ export default function RoomTV() {
             scoring:
               (m as { scoring?: "microfone" | "aleatoria" }).scoring ??
               (localMetrics ? "microfone" : "aleatoria"),
-            voiceLine: localMetrics
-              ? voiceSummary(localMetrics)
-              : "Sem microfone ligado — nota do modo festa (sorteio). Ligue o microfone na TV para pontuar cantando de verdade.",
+            voiceLine: [
+              localMetrics ? voiceSummary(localMetrics) : "Sem microfone ligado.",
+              (m as { crowdAverage?: number | null }).crowdAverage != null
+                ? `Plateia: média ${(m as { crowdAverage?: number }).crowdAverage!.toFixed(1)}/10 em ${
+                    (m as { crowdCount?: number }).crowdCount ?? 0
+                  } voto(s) — peso 30% na nota final.`
+                : "Ninguém votou pela plateia desta vez.",
+            ].join(" "),
           });
         } else if (m.type === "PLAYER_COMMAND") {
           if (playerRef.current) {
@@ -550,10 +572,17 @@ export default function RoomTV() {
     return () => ws.close();
   }, [code, authChecked]);
 
+  // Ao começar uma música, abre a votação da plateia (o público vota no celular)
+  useEffect(() => {
+    if (!code || !videoId) return;
+    void openCrowdVote(code).catch(() => {});
+  }, [code, videoId]);
+
   // Começo de música: zera duração e libera o aviso de falha
   useEffect(() => {
     setVideoDur(0);
     setYtFailed(false);
+    setYtErrorCode(null);
     if (!videoId) return;
     const saved = Number(localStorage.getItem(`lyricShift_${videoId}`) || 0);
     setLyricShift(isFinite(saved) ? saved : 0);
@@ -569,6 +598,33 @@ export default function RoomTV() {
     },
     [videoId]
   );
+
+  // Vigia: alguns erros (o 153, por exemplo) aparecem DENTRO do iframe sem
+  // disparar onError. Se depois de 9 s o tempo do vídeo não saiu de zero,
+  // tratamos como falha para o aviso e o botão de saída aparecerem.
+  useEffect(() => {
+    if (!videoId || ytFailed) return;
+    const started = Date.now();
+    const id = window.setInterval(() => {
+      const pl = playerRef.current;
+      if (!pl) return;
+      try {
+        const t = pl.getCurrentTime();
+        const st = pl.getPlayerState();
+        if (t > 0.5 || st === 1) {
+          window.clearInterval(id);
+          return;
+        }
+      } catch {
+        /* player ainda montando */
+      }
+      if (Date.now() - started > 9000) {
+        window.clearInterval(id);
+        setYtFailed(true);
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [videoId, ytFailed, playerHost]);
 
   // Vídeo que não toca: espera 5 s (dá tempo de ler o aviso) e passa para o próximo.
   // Trava de segurança: depois de 3 vídeos seguidos com erro, para de pular sozinho
@@ -631,6 +687,10 @@ export default function RoomTV() {
         videoId,
         width: "100%",
         height: "100%",
+        host:
+          playerHost === "nocookie"
+            ? "https://www.youtube-nocookie.com"
+            : "https://www.youtube.com",
         playerVars: {
           autoplay: 1,
           rel: 0,
@@ -638,9 +698,29 @@ export default function RoomTV() {
           start: 0,
           playsinline: 1,
           enablejsapi: 1,
+          // Desde o fim de 2025 o player incorporado exige a identificação da
+          // origem; sem isso o YouTube responde erro 153.
+          origin: window.location.origin,
+          widget_referrer: window.location.href,
         },
         events: {
           onReady: e => {
+            // A API cria o iframe sem o atributo; reforçamos aqui porque o
+            // YouTube exige o Referer desde o fim de 2025 (erro 153).
+            try {
+              const frame = (
+                e.target as unknown as { getIframe?: () => HTMLIFrameElement }
+              ).getIframe?.();
+              if (frame) {
+                frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+                frame.setAttribute(
+                  "allow",
+                  "autoplay; encrypted-media; picture-in-picture"
+                );
+              }
+            } catch {
+              /* sem permissão para inspecionar o iframe */
+            }
             e.target.playVideo();
           },
           onStateChange: e => {
@@ -648,9 +728,15 @@ export default function RoomTV() {
               handleVideoEnd();
             }
           },
-          onError: () => {
-            // vídeo bloqueado pelo dono / não incorporável:
-            // avisa na tela e, em 5 s, pula para a próxima da fila
+          onError: e => {
+            // 101/150 = dono bloqueou a incorporação | 153 = o YouTube não
+            // reconheceu a origem (passou a exigir Referer no fim de 2025)
+            const code = (e as { data?: number })?.data;
+            setYtErrorCode(typeof code === "number" ? code : null);
+            if (code === 153 || code === 150 || code === 101) {
+              // uma tentativa no outro domínio antes de desistir
+              setPlayerHost(h => (h === "nocookie" ? "normal" : "nocookie"));
+            }
             setYtFailed(true);
           },
         },
@@ -827,6 +913,51 @@ export default function RoomTV() {
             }}
           />
 
+          {/* Placar da plateia ao vivo */}
+          {state.crowd?.open && state.crowd.count > 0 && !showScore && (
+            <div
+              style={{
+                position: "absolute",
+                top: 96,
+                right: 24,
+                zIndex: 15,
+                padding: "12px 16px",
+                borderRadius: 14,
+                background: "rgba(8,10,20,.78)",
+                border: "1px solid rgba(255,64,129,.5)",
+                textAlign: "center",
+                minWidth: 132,
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  letterSpacing: ".14em",
+                  textTransform: "uppercase",
+                  opacity: 0.7,
+                  fontWeight: 800,
+                }}
+              >
+                Plateia
+              </div>
+              <div
+                style={{
+                  fontSize: 34,
+                  fontWeight: 900,
+                  fontVariantNumeric: "tabular-nums",
+                  color: "#ffd166",
+                  lineHeight: 1.1,
+                }}
+              >
+                {state.crowd.average?.toFixed(1)}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                {state.crowd.count} voto{state.crowd.count === 1 ? "" : "s"}
+              </div>
+            </div>
+          )}
+
           {/* Vídeo não incorporável: mostra a capa e explica o que fazer */}
           {ytFailed && (
             <div
@@ -857,10 +988,26 @@ export default function RoomTV() {
                 Este vídeo não permite ser tocado dentro de outro site
               </div>
               <div style={{ opacity: 0.75, maxWidth: 620, lineHeight: 1.45 }}>
-                A letra e o microfone continuam funcionando. Para a festa não
-                parar: escolha outra versão desta música no celular (a busca
-                mostra várias) ou toque em “Pular” e siga para a próxima.
+                {ytErrorCode === 153
+                  ? "Erro 153 é do YouTube: ele exige a identificação do site que incorpora o vídeo. Recarregue a página (F5) — o app já envia essa identificação. Se insistir, abra o vídeo no YouTube pelo botão abaixo e cante com a letra e o microfone daqui."
+                  : "A letra e o microfone continuam funcionando. Para a festa não parar: escolha outra versão desta música no celular (a busca mostra várias) ou toque em “Pular” e siga para a próxima."}
               </div>
+              <a
+                href={`https://www.youtube.com/watch?v=${videoId}`}
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{
+                  padding: "10px 18px",
+                  borderRadius: 10,
+                  background: "#fff",
+                  color: "#000",
+                  fontWeight: 700,
+                  textDecoration: "none",
+                  fontSize: ".95rem",
+                }}
+              >
+                Abrir no YouTube ↗
+              </a>
               {autoSkips >= 3 ? (
                 <div
                   style={{

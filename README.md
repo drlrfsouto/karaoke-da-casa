@@ -93,6 +93,29 @@ Aplicação em `http://localhost:3000` — a TV abre em `/room/CODIGO/tv` e o ce
 
 ## ✨ Funcionalidades
 
+### Catálogo (24 mil músicas) ✅
+
+O app já vem com o pipeline que monta um repertório de karaokê de verdade:
+
+**Já tem o catálogo pronto aqui:** `catalogo-bonito.json.gz` (715 KB). Descompacte
+(`gunzip catalogo-bonito.json.gz` no Linux/Mac, ou botão direito > extrair no Windows)
+e importe pelo celular — não precisa rodar script nenhum.
+
+Para refazer/atualizar o catálogo:
+
+```bash
+python3 tools/importar_tvkaraoke.py --all --workers 12 --out catalogo.json   # ~1 h, retomável
+python3 tools/enriquecer_catalogo.py --in catalogo.json --out catalogo-bonito.json  # ~1 min
+# no celular: aba "Músicas" > "Escolher arquivo" > catalogo-bonito.json
+```
+
+- **24.456 músicas** coletadas do catálogo público do TVKaraokê (curadoria de vídeos de karaokê do YouTube);
+- títulos reais do YouTube, separados em **`Artista — Título`** ("Anitta Capa De Revista" → "Anitta — Capa de Revista");
+- importação em **uma chamada** (24 mil em ~2 s) e reimportação que **renomeia sem duplicar**;
+- busca **no catálogo inteiro, no servidor**, ignorando acento e maiúscula ("avioes" acha "Aviões do Forró") em ~10 ms.
+
+Também existe `python3 tools/pipeline_catalogo.py`, que encadeia coleta + enriquecimento + importação.
+
 ### Implementadas ✅
 
 - **Salas em tempo real** - Código de 5 caracteres, WebSocket para sync instantâneo

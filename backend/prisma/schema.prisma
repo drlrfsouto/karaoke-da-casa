@@ -43,10 +43,13 @@ model Song {
   id           String    @id @default(uuid())
   videoId      String    @unique @map("video_id")
   title        String
+  /// título sem acento e em minúsculas, usado na busca (ver lib/text.ts)
+  searchKey    String    @default("") @map("search_key")
   addedBy      String    @map("added_by")
   playCount    Int       @default(0) @map("play_count")
   createdAt    DateTime  @default(now()) @map("created_at")
   lastPlayedAt DateTime? @map("last_played_at")
 
+  @@index([searchKey])
   @@map("songs")
 }

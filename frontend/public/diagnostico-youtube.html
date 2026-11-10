@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<!-- igual ao app: se faltar isso, o YouTube recusa com erro 153 -->
+<meta name="referrer" content="strict-origin-when-cross-origin" />
+<title>Diagnóstico do player do YouTube</title>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#11131a; color:#eee; padding:24px; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  p.sub { margin:0 0 20px; opacity:.7; font-size:13px; }
+  table { border-collapse: collapse; width: 100%; max-width: 900px; }
+  td, th { border-bottom:1px solid #2a2e3a; padding:10px 8px; text-align:left; font-size:13px; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.08em; opacity:.6; }
+  .ok { color:#22e3c3; font-weight:700; }
+  .bad { color:#ff6b6b; font-weight:700; }
+  .wait { color:#ffd166; }
+  .frame { width:200px; height:112px; background:#000; border-radius:6px; overflow:hidden; }
+  #resumo { margin-top:20px; padding:14px; background:#1b1f2a; border-radius:10px; font-size:14px; white-space:pre-wrap; }
+  button { margin-top:12px; padding:8px 14px; border-radius:8px; border:0; background:#ff2e88; color:#fff; font-weight:700; cursor:pointer; }
+</style>
+</head>
+<body>
+  <div id="avisoFile" style="display:none; margin-bottom:18px; padding:14px 16px; border-radius:10px; background:#3a2410; border:1px solid #ffb020; color:#ffd490; font-size:14px; line-height:1.5;">
+    <b>Este teste não vale assim.</b> Você abriu o arquivo direto do disco (<code>file://</code>).
+    Sem um endereço <code>http://</code> o navegador não informa o site ao YouTube, então
+    <b>o erro 153 é garantido</b>. Feche esta aba e abra pelo servidor:
+    <code>http://localhost:3000/diagnostico-youtube.html</code>.
+  </div>
+  <h1>Diagnóstico: qual forma do player do YouTube funciona na sua rede?</h1>
+  <p class="sub">
+    Cada linha tenta uma combinação diferente. Espera ~8 segundos. A coluna “resultado” diz
+    se o vídeo tocou. Deixe esta aba aberta e depois copie o resumo para me enviar.
+  </p>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Combinação</th><th>Player</th><th>Resultado</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="resumo">testando…</div>
+  <button onclick="navigator.clipboard.writeText(document.getElementById('resumo').textContent).then(()=>this.textContent='copiado!')">Copiar resumo</button>
+
+<script>
+const VIDEO = "tfhwXKd1W_o"; // Evidências (karaokê)
+const CASES = [
+  { n:1, label:"YouTube normal, com origin + widget_referrer", host:"https://www.youtube.com", vars:{ origin:location.origin, widget_referrer:location.href } },
+  { n:2, label:"YouTube normal, SEM parâmetros", host:"https://www.youtube.com", vars:{} },
+  { n:3, label:"youtube-nocookie, com origin + widget_referrer", host:"https://www.youtube-nocookie.com", vars:{ origin:location.origin, widget_referrer:location.href } },
+  { n:4, label:"youtube-nocookie, SEM parâmetros", host:"https://www.youtube-nocookie.com", vars:{} },
+  { n:5, label:"YouTube normal, origin fixo \"youtube.com\"", host:"https://www.youtube.com", vars:{ origin:"youtube.com" } },
+];
+
+const rows = document.getElementById("rows");
+const tbody = {};
+CASES.forEach(c => {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td>${c.n}</td><td>${c.label}</td><td><div class="frame" id="host${c.n}"></div></td><td class="wait" id="r${c.n}">…</td>`;
+  rows.appendChild(tr);
+  tbody[c.n] = null;
+});
+
+function finaliza(n, txt, ok) {
+  const cell = document.getElementById("r" + n);
+  if (!cell || cell.dataset.done) return;
+  cell.dataset.done = "1";
+  cell.textContent = txt;
+  cell.className = ok ? "ok" : "bad";
+  tbody[n] = txt;
+  atualizaResumo();
+}
+
+function atualizaResumo() {
+  const total = CASES.length;
+  const prontos = Object.values(tbody).filter(Boolean).length;
+  const linhas = CASES.map(c => `${c.n}. ${c.label}: ${tbody[c.n] || "sem resposta"}`);
+  const vencedor = CASES.find(c => (tbody[c.n] || "").startsWith("TOCOU"));
+  document.getElementById("resumo").textContent =
+    `URL: ${location.href}\nOrigem: ${location.origin}\n` +
+    `User agent: ${navigator.userAgent}\n` +
+    `Testados: ${prontos}/${total}\n\n` + linhas.join("\n") +
+    `\n\nMELHOR OPÇÃO: ${vencedor ? vencedor.label : "nenhuma tocou nesta rede"}`;
+}
+
+function init() {
+  CASES.forEach(c => {
+    try {
+      const pl = new window.YT.Player("host" + c.n, {
+        videoId: VIDEO,
+        host: c.host,
+        width: 200,
+        height: 112,
+        playerVars: Object.assign({ autoplay: 1, playsinline: 1, rel: 0 }, c.vars),
+        events: {
+          onReady: e => {
+            try {
+              const f = e.target.getIframe();
+              f.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+            } catch (_) {}
+            e.target.playVideo();
+            setTimeout(() => {
+              let t = 0, st = -1;
+              try { t = e.target.getCurrentTime(); st = e.target.getPlayerState(); } catch (_) {}
+              if (t > 0.4 || st === 1) finaliza(c.n, `TOCOU (t=${t.toFixed(1)}s)`, true);
+              else finaliza(c.n, "não tocou (sem erro reportado)", false);
+            }, 7000);
+          },
+          onError: e => finaliza(c.n, "ERRO " + e.data, false),
+        },
+      });
+    } catch (err) {
+      finaliza(c.n, "falhou ao criar: " + err, false);
+    }
+  });
+  setTimeout(() => { CASES.forEach(c => { if (!tbody[c.n]) finaliza(c.n, "sem resposta (timeout)", false); }); }, 12000);
+}
+
+// se foi aberto direto do disco, avisa antes de tudo
+if (location.protocol === "file:") {
+  document.getElementById("avisoFile").style.display = "block";
+}
+
+// carrega a IFrame API
+const tag = document.createElement("script");
+tag.src = "https://www.youtube.com/iframe_api";
+tag.onload = () => {
+  if (window.YT && window.YT.Player) init();
+  else window.onYouTubeIframeAPIReady = init;
+};
+tag.onerror = () => {
+  document.getElementById("resumo").textContent = "Não consegui carregar a API do YouTube (rede bloqueando youtube.com?).";
+};
+window.onYouTubeIframeAPIReady = () => { if (window.YT && window.YT.Player) init(); };
+document.head.appendChild(tag);
+</script>
+</body>
+</html>
